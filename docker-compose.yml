@@ -32,6 +32,9 @@ services:
       - ATLAB_TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - ATLAB_SSH_USER=root
       - ATLAB_SSH_PASSWORD=@tloginroot
+      - ATLAB_PROMETHEUS_HOST=10.101.53.212
+      - ATLAB_PROMETHEUS_SSH_USER=atlab
+      - ATLAB_PROMETHEUS_SSH_PASSWORD=@tloginroot
 
   # ─── Frontend (React + Nginx) ──────────────────────────────
   frontend:
