@@ -43,12 +43,9 @@ services:
       dockerfile: Dockerfile
     container_name: atlas-frontend
     restart: unless-stopped
-    ports:
-      - "80:80"
+    network_mode: host
     depends_on:
       - backend
-    networks:
-      - atlas-net
 
   # ─── PostgreSQL ────────────────────────────────────────────
   postgres:
