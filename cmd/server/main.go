@@ -730,27 +730,35 @@ func main() {
 		instance := ip + ":9100"
 
 		type MetricResult struct {
-			CPU          float64 `json:"cpu_percent"`
-			MemTotal     float64 `json:"mem_total_bytes"`
-			MemAvailable float64 `json:"mem_available_bytes"`
-			MemPercent   float64 `json:"mem_percent"`
-			DiskTotal    float64 `json:"disk_total_bytes"`
-			DiskFree     float64 `json:"disk_free_bytes"`
-			DiskPercent  float64 `json:"disk_percent"`
-			Load1        float64 `json:"load_1"`
-			Load5        float64 `json:"load_5"`
-			Load15       float64 `json:"load_15"`
-			NetRxBytes   float64 `json:"net_rx_bytes_per_sec"`
-			NetTxBytes   float64 `json:"net_tx_bytes_per_sec"`
-			Uptime       float64 `json:"uptime_seconds"`
+			CPU            float64 `json:"cpu_percent"`
+			MemTotal       float64 `json:"mem_total_bytes"`
+			MemAvailable   float64 `json:"mem_available_bytes"`
+			MemPercent     float64 `json:"mem_percent"`
+			SwapTotal      float64 `json:"swap_total_bytes"`
+			SwapUsed       float64 `json:"swap_used_bytes"`
+			DiskTotal      float64 `json:"disk_total_bytes"`
+			DiskFree       float64 `json:"disk_free_bytes"`
+			DiskPercent    float64 `json:"disk_percent"`
+			Load1          float64 `json:"load_1"`
+			Load5          float64 `json:"load_5"`
+			Load15         float64 `json:"load_15"`
+			NetRxBytes     float64 `json:"net_rx_bytes_per_sec"`
+			NetTxBytes     float64 `json:"net_tx_bytes_per_sec"`
+			NetErrors      float64 `json:"net_errors"`
+			TCPConnections float64 `json:"tcp_connections"`
+			Uptime         float64 `json:"uptime_seconds"`
+			Processes      float64 `json:"processes_total"`
+			ProcessesZombie float64 `json:"processes_zombie"`
+			IOPSRead       float64 `json:"iops_read"`
+			IOPSWrite      float64 `json:"iops_write"`
+			DiskLatency    float64 `json:"disk_latency_ms"`
 		}
 
 		result := MetricResult{}
 
-		// CPU usage (percentage)
-		cpuVal := queryPrometheus(promURL, fmt.Sprintf(
+		// CPU usage
+		result.CPU = queryPrometheus(promURL, fmt.Sprintf(
 			`100 - (avg(rate(node_cpu_seconds_total{instance="%s",mode="idle"}[2m])) * 100)`, instance))
-		result.CPU = cpuVal
 
 		// Memory
 		result.MemTotal = queryPrometheus(promURL, fmt.Sprintf(
@@ -760,6 +768,13 @@ func main() {
 		if result.MemTotal > 0 {
 			result.MemPercent = (result.MemTotal - result.MemAvailable) / result.MemTotal * 100
 		}
+
+		// Swap
+		result.SwapTotal = queryPrometheus(promURL, fmt.Sprintf(
+			`node_memory_SwapTotal_bytes{instance="%s"}`, instance))
+		swapFree := queryPrometheus(promURL, fmt.Sprintf(
+			`node_memory_SwapFree_bytes{instance="%s"}`, instance))
+		result.SwapUsed = result.SwapTotal - swapFree
 
 		// Disk (root filesystem)
 		result.DiskTotal = queryPrometheus(promURL, fmt.Sprintf(
@@ -778,15 +793,42 @@ func main() {
 		result.Load15 = queryPrometheus(promURL, fmt.Sprintf(
 			`node_load15{instance="%s"}`, instance))
 
-		// Network (rate per second, first non-lo interface)
+		// Network (rate per second, all non-lo interfaces summed)
 		result.NetRxBytes = queryPrometheus(promURL, fmt.Sprintf(
-			`rate(node_network_receive_bytes_total{instance="%s",device!="lo"}[2m])`, instance))
+			`sum(rate(node_network_receive_bytes_total{instance="%s",device!="lo"}[2m]))`, instance))
 		result.NetTxBytes = queryPrometheus(promURL, fmt.Sprintf(
-			`rate(node_network_transmit_bytes_total{instance="%s",device!="lo"}[2m])`, instance))
+			`sum(rate(node_network_transmit_bytes_total{instance="%s",device!="lo"}[2m]))`, instance))
+
+		// Network errors
+		result.NetErrors = queryPrometheus(promURL, fmt.Sprintf(
+			`sum(rate(node_network_receive_errs_total{instance="%s"}[5m])) + sum(rate(node_network_transmit_errs_total{instance="%s"}[5m]))`, instance, instance))
+
+		// TCP connections
+		result.TCPConnections = queryPrometheus(promURL, fmt.Sprintf(
+			`node_netstat_Tcp_CurrEstab{instance="%s"}`, instance))
 
 		// Uptime
 		result.Uptime = queryPrometheus(promURL, fmt.Sprintf(
 			`time() - node_boot_time_seconds{instance="%s"}`, instance))
+
+		// Processes
+		result.Processes = queryPrometheus(promURL, fmt.Sprintf(
+			`node_procs_running{instance="%s"} + node_procs_blocked{instance="%s"}`, instance, instance))
+		result.ProcessesZombie = queryPrometheus(promURL, fmt.Sprintf(
+			`node_processes_zombies{instance="%s"}`, instance))
+
+		// Disk I/O (IOPS and latency)
+		result.IOPSRead = queryPrometheus(promURL, fmt.Sprintf(
+			`sum(rate(node_disk_reads_completed_total{instance="%s"}[2m]))`, instance))
+		result.IOPSWrite = queryPrometheus(promURL, fmt.Sprintf(
+			`sum(rate(node_disk_writes_completed_total{instance="%s"}[2m]))`, instance))
+		// Disk latency in ms
+		diskTime := queryPrometheus(promURL, fmt.Sprintf(
+			`sum(rate(node_disk_io_time_seconds_total{instance="%s"}[2m]))`, instance))
+		diskOps := result.IOPSRead + result.IOPSWrite
+		if diskOps > 0 {
+			result.DiskLatency = (diskTime / diskOps) * 1000
+		}
 
 		return c.JSON(result)
 	})
