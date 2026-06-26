@@ -39,7 +39,7 @@ services:
   # ─── Frontend (React + Nginx) ──────────────────────────────
   frontend:
     build:
-      context: ../frontend
+      context: ../atlas-frontend
       dockerfile: Dockerfile
     container_name: atlas-frontend
     restart: unless-stopped
