@@ -12,13 +12,12 @@ services:
       dockerfile: Dockerfile
     container_name: atlas-backend
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    network_mode: host
     environment:
       - ATLAB_ENV=production
       - ATLAB_PORT=8080
-      - ATLAB_DB_URL=postgres://atlas:${DB_PASSWORD}@postgres:5432/atlas?sslmode=disable
-      - ATLAB_REDIS_URL=redis://redis:6379/0
+      - ATLAB_DB_URL=postgres://atlas:${DB_PASSWORD}@127.0.0.1:5432/atlas?sslmode=disable
+      - ATLAB_REDIS_URL=redis://127.0.0.1:6379/0
       - ATLAB_PROMETHEUS_URL=http://10.101.53.212:9000
       - ATLAB_AUTHENTIK_ISSUER=https://authentik.atlab.ufc.br/application/o/atlab-platform/
       - ATLAB_AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
@@ -33,13 +32,6 @@ services:
       - ATLAB_TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - ATLAB_SSH_USER=root
       - ATLAB_SSH_PASSWORD=@tloginroot
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - atlas-net
 
   # ─── Frontend (React + Nginx) ──────────────────────────────
   frontend:
@@ -60,6 +52,8 @@ services:
     image: postgres:16-alpine
     container_name: atlas-postgres
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: atlas
       POSTGRES_USER: atlas
@@ -80,6 +74,8 @@ services:
     image: redis:7-alpine
     container_name: atlas-redis
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
     volumes:
       - redisdata:/data
