@@ -1,0 +1,37 @@
+[
+  {
+    "targets": ["10.101.53.240:9100"],
+    "labels": {
+      "hostname": "proxmox-alpha",
+      "type": "baremetal",
+      "managed_by": "atlas"
+    }
+  },
+  {
+    "targets": ["10.101.53.203:9100"],
+    "labels": {
+      "hostname": "CLUSTERLEX",
+      "type": "vm",
+      "node": "proxmox-alpha",
+      "managed_by": "atlas"
+    }
+  },
+  {
+    "targets": ["10.101.53.202:9100"],
+    "labels": {
+      "hostname": "VM-GPU-ALPHA",
+      "type": "vm",
+      "node": "proxmox-alpha",
+      "managed_by": "atlas"
+    }
+  },
+  {
+    "targets": ["10.101.53.218:9100"],
+    "labels": {
+      "hostname": "ATLAS",
+      "type": "vm",
+      "node": "proxmox-alpha",
+      "managed_by": "atlas"
+    }
+  }
+]

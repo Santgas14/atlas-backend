@@ -1,0 +1,17 @@
+# ATLAS Prometheus — Coleta automática gerenciada pelo backend
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  # Próprio Prometheus
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9191"]
+
+  # Targets gerenciados pelo ATLAS (file_sd — backend atualiza o JSON)
+  - job_name: "atlas-nodes"
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 15s

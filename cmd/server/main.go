@@ -372,71 +372,55 @@ UNIT`,
 	st.Bootstrapped = st.NodeExporterRun
 	if st.Bootstrapped {
 		log.Printf("[bootstrap] %s (%s): node_exporter installed and running ✓", st.Name, st.IP)
-		// Auto-register in Prometheus
+		// Auto-register in local Prometheus (file_sd)
 		go registerInPrometheus(st.IP, st.Name)
 	}
 }
 
-// registerInPrometheus adds the VM as a target in the Prometheus config via SSH
+// registerInPrometheus adds the VM to the local file_sd targets JSON
 func registerInPrometheus(ip, hostname string) {
-	promHost := getEnv("ATLAB_PROMETHEUS_HOST", "10.101.53.212")
-	promUser := getEnv("ATLAB_PROMETHEUS_SSH_USER", "atlab")
-	promPassword := getEnv("ATLAB_PROMETHEUS_SSH_PASSWORD", "@tloginroot")
-	configPath := "/monitoramento/prometheus/prometheus.yml"
+	targetsFile := getEnv("ATLAB_PROMETHEUS_TARGETS_FILE", "/opt/atlas/backend/prometheus/targets/atlas-vms.json")
 
-	// Connect to Prometheus server via SSH
-	config := &ssh.ClientConfig{
-		User: promUser,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(promPassword),
+	// Read current targets
+	data, err := os.ReadFile(targetsFile)
+	if err != nil {
+		log.Printf("[prometheus] Cannot read targets file: %v", err)
+		return
+	}
+
+	// Check if already exists
+	if strings.Contains(string(data), ip+":9100") {
+		log.Printf("[prometheus] %s (%s) already in targets, skipping", hostname, ip)
+		return
+	}
+
+	// Parse existing targets
+	type Target struct {
+		Targets []string          `json:"targets"`
+		Labels  map[string]string `json:"labels"`
+	}
+	var targets []Target
+	if err := json.Unmarshal(data, &targets); err != nil {
+		log.Printf("[prometheus] Cannot parse targets: %v", err)
+		return
+	}
+
+	// Add new target
+	targets = append(targets, Target{
+		Targets: []string{ip + ":9100"},
+		Labels: map[string]string{
+			"hostname":   hostname,
+			"type":       "vm",
+			"managed_by": "atlas",
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         5 * time.Second,
-	}
+	})
 
-	client, err := ssh.Dial("tcp", promHost+":22", config)
-	if err != nil {
-		log.Printf("[prometheus] Failed to connect to %s: %v", promHost, err)
+	// Write back
+	newData, _ := json.MarshalIndent(targets, "", "  ")
+	if err := os.WriteFile(targetsFile, newData, 0644); err != nil {
+		log.Printf("[prometheus] Cannot write targets: %v", err)
 		return
 	}
-	defer client.Close()
-
-	// Check if target already exists
-	session, _ := client.NewSession()
-	out, _ := session.CombinedOutput(fmt.Sprintf("grep -c '%s:9100' %s", ip, configPath))
-	session.Close()
-	if strings.TrimSpace(string(out)) != "0" {
-		log.Printf("[prometheus] %s (%s) already in config, skipping", hostname, ip)
-		return
-	}
-
-	// Build the new target entry
-	entry := fmt.Sprintf(`
-    - targets: ["%s:9100"]
-      labels:
-        job: "vms"
-        hostname: "%s"
-        host_pai: "proxmox-alpha"
-        managed_by: "atlas"`, ip, hostname)
-
-	// Append to the node_exporter job section (before process_exporter section)
-	appendCmd := fmt.Sprintf(`sed -i '/# CAMADA 2: PROCESS EXPORTER/i\%s' %s`, strings.ReplaceAll(entry, "\n", "\\n"), configPath)
-	session2, _ := client.NewSession()
-	_, err = session2.CombinedOutput(appendCmd)
-	session2.Close()
-
-	if err != nil {
-		// Fallback: append at end of node_exporter section using echo
-		fallbackCmd := fmt.Sprintf(`echo '%s' >> %s`, entry, configPath)
-		session3, _ := client.NewSession()
-		session3.CombinedOutput(fallbackCmd)
-		session3.Close()
-	}
-
-	// Reload Prometheus
-	session4, _ := client.NewSession()
-	session4.CombinedOutput("curl -s -X POST http://localhost:9090/-/reload 2>/dev/null || kill -HUP $(pgrep prometheus) 2>/dev/null")
-	session4.Close()
 
 	log.Printf("[prometheus] %s (%s) registered as target ✓", hostname, ip)
 }

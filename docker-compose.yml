@@ -13,12 +13,14 @@ services:
     container_name: atlas-backend
     restart: unless-stopped
     network_mode: host
+    volumes:
+      - ./prometheus/targets:/opt/atlas/backend/prometheus/targets
     environment:
       - ATLAB_ENV=production
       - ATLAB_PORT=8080
       - ATLAB_DB_URL=postgres://atlas:${DB_PASSWORD}@127.0.0.1:5432/atlas?sslmode=disable
       - ATLAB_REDIS_URL=redis://127.0.0.1:6379/0
-      - ATLAB_PROMETHEUS_URL=http://10.101.53.212:9090
+      - ATLAB_PROMETHEUS_URL=http://127.0.0.1:9191
       - ATLAB_AUTHENTIK_ISSUER=https://authentik.atlab.ufc.br/application/o/atlab-platform/
       - ATLAB_AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
       - ATLAB_AUTHENTIK_CLIENT_SECRET=${AUTHENTIK_CLIENT_SECRET}
@@ -32,9 +34,7 @@ services:
       - ATLAB_TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - ATLAB_SSH_USER=root
       - ATLAB_SSH_PASSWORD=@tloginroot
-      - ATLAB_PROMETHEUS_HOST=10.101.53.212
-      - ATLAB_PROMETHEUS_SSH_USER=atlab
-      - ATLAB_PROMETHEUS_SSH_PASSWORD=@tloginroot
+      - ATLAB_PROMETHEUS_TARGETS_FILE=/opt/atlas/backend/prometheus/targets/atlas-vms.json
 
   # ─── Frontend (React + Nginx) ──────────────────────────────
   frontend:
@@ -90,9 +90,27 @@ services:
     networks:
       - atlas-net
 
+  # ─── Prometheus (coleta própria do ATLAS) ──────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: atlas-prometheus
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/targets:/etc/prometheus/targets
+      - promdata:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.listen-address=:9191'
+
 volumes:
   pgdata:
   redisdata:
+  promdata:
 
 networks:
   atlas-net:
