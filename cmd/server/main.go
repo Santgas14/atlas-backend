@@ -671,8 +671,11 @@ func main() {
 	// ─── Prometheus metrics query ────────────────────────────
 	promURL := getEnv("ATLAB_PROMETHEUS_URL", "http://10.101.53.212:9000")
 
-	api.Get("/machines/:ip/metrics", func(c *fiber.Ctx) error {
-		ip := c.Params("ip")
+	api.Get("/metrics", func(c *fiber.Ctx) error {
+		ip := c.Query("ip")
+		if ip == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "ip query param required"})
+		}
 		instance := ip + ":9100"
 
 		type MetricResult struct {
