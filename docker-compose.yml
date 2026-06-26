@@ -18,7 +18,7 @@ services:
       - ATLAB_PORT=8080
       - ATLAB_DB_URL=postgres://atlas:${DB_PASSWORD}@127.0.0.1:5432/atlas?sslmode=disable
       - ATLAB_REDIS_URL=redis://127.0.0.1:6379/0
-      - ATLAB_PROMETHEUS_URL=http://10.101.53.212:9000
+      - ATLAB_PROMETHEUS_URL=http://10.101.53.212:9090
       - ATLAB_AUTHENTIK_ISSUER=https://authentik.atlab.ufc.br/application/o/atlab-platform/
       - ATLAB_AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
       - ATLAB_AUTHENTIK_CLIENT_SECRET=${AUTHENTIK_CLIENT_SECRET}

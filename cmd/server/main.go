@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -669,7 +670,7 @@ func main() {
 	})
 
 	// ─── Prometheus metrics query ────────────────────────────
-	promURL := getEnv("ATLAB_PROMETHEUS_URL", "http://10.101.53.212:9000")
+	promURL := getEnv("ATLAB_PROMETHEUS_URL", "http://10.101.53.212:9090")
 
 	api.Get("/metrics", func(c *fiber.Ctx) error {
 		ip := c.Query("ip")
@@ -780,8 +781,8 @@ func getEnv(key, fallback string) string {
 
 // queryPrometheus executa uma instant query e retorna o valor numérico.
 func queryPrometheus(baseURL, query string) float64 {
-	url := fmt.Sprintf("%s/api/v1/query?query=%s", baseURL, urlEncode(query))
-	resp, err := http.Get(url)
+	reqURL := fmt.Sprintf("%s/api/v1/query?query=%s", baseURL, url.QueryEscape(query))
+	resp, err := http.Get(reqURL)
 	if err != nil {
 		return 0
 	}
@@ -822,20 +823,4 @@ func queryPrometheus(baseURL, query string) float64 {
 	var val float64
 	fmt.Sscanf(valStr, "%f", &val)
 	return val
-}
-
-func urlEncode(s string) string {
-	// Simple URL encoding for prometheus queries
-	replacer := strings.NewReplacer(
-		" ", "%20",
-		"{", "%7B",
-		"}", "%7D",
-		"\"", "%22",
-		"[", "%5B",
-		"]", "%5D",
-		"=", "%3D",
-		",", "%2C",
-		"!", "%21",
-	)
-	return replacer.Replace(s)
 }
