@@ -668,6 +668,75 @@ func main() {
 		return c.JSON(fiber.Map{"alerts": []interface{}{}})
 	})
 
+	// ─── Prometheus metrics query ────────────────────────────
+	promURL := getEnv("ATLAB_PROMETHEUS_URL", "http://10.101.53.212:9000")
+
+	api.Get("/machines/:ip/metrics", func(c *fiber.Ctx) error {
+		ip := c.Params("ip")
+		instance := ip + ":9100"
+
+		type MetricResult struct {
+			CPU          float64 `json:"cpu_percent"`
+			MemTotal     float64 `json:"mem_total_bytes"`
+			MemAvailable float64 `json:"mem_available_bytes"`
+			MemPercent   float64 `json:"mem_percent"`
+			DiskTotal    float64 `json:"disk_total_bytes"`
+			DiskFree     float64 `json:"disk_free_bytes"`
+			DiskPercent  float64 `json:"disk_percent"`
+			Load1        float64 `json:"load_1"`
+			Load5        float64 `json:"load_5"`
+			Load15       float64 `json:"load_15"`
+			NetRxBytes   float64 `json:"net_rx_bytes_per_sec"`
+			NetTxBytes   float64 `json:"net_tx_bytes_per_sec"`
+			Uptime       float64 `json:"uptime_seconds"`
+		}
+
+		result := MetricResult{}
+
+		// CPU usage (percentage)
+		cpuVal := queryPrometheus(promURL, fmt.Sprintf(
+			`100 - (avg(rate(node_cpu_seconds_total{instance="%s",mode="idle"}[2m])) * 100)`, instance))
+		result.CPU = cpuVal
+
+		// Memory
+		result.MemTotal = queryPrometheus(promURL, fmt.Sprintf(
+			`node_memory_MemTotal_bytes{instance="%s"}`, instance))
+		result.MemAvailable = queryPrometheus(promURL, fmt.Sprintf(
+			`node_memory_MemAvailable_bytes{instance="%s"}`, instance))
+		if result.MemTotal > 0 {
+			result.MemPercent = (result.MemTotal - result.MemAvailable) / result.MemTotal * 100
+		}
+
+		// Disk (root filesystem)
+		result.DiskTotal = queryPrometheus(promURL, fmt.Sprintf(
+			`node_filesystem_size_bytes{instance="%s",mountpoint="/"}`, instance))
+		result.DiskFree = queryPrometheus(promURL, fmt.Sprintf(
+			`node_filesystem_avail_bytes{instance="%s",mountpoint="/"}`, instance))
+		if result.DiskTotal > 0 {
+			result.DiskPercent = (result.DiskTotal - result.DiskFree) / result.DiskTotal * 100
+		}
+
+		// Load average
+		result.Load1 = queryPrometheus(promURL, fmt.Sprintf(
+			`node_load1{instance="%s"}`, instance))
+		result.Load5 = queryPrometheus(promURL, fmt.Sprintf(
+			`node_load5{instance="%s"}`, instance))
+		result.Load15 = queryPrometheus(promURL, fmt.Sprintf(
+			`node_load15{instance="%s"}`, instance))
+
+		// Network (rate per second, first non-lo interface)
+		result.NetRxBytes = queryPrometheus(promURL, fmt.Sprintf(
+			`rate(node_network_receive_bytes_total{instance="%s",device!="lo"}[2m])`, instance))
+		result.NetTxBytes = queryPrometheus(promURL, fmt.Sprintf(
+			`rate(node_network_transmit_bytes_total{instance="%s",device!="lo"}[2m])`, instance))
+
+		// Uptime
+		result.Uptime = queryPrometheus(promURL, fmt.Sprintf(
+			`time() - node_boot_time_seconds{instance="%s"}`, instance))
+
+		return c.JSON(result)
+	})
+
 	log.Printf("✓ ATLAS Backend v0.3.0 rodando em :%s", port)
 	log.Printf("  Proxmox nodes: %v", pve.Nodes)
 	log.Printf("  Known VMs: %v", knownIPs)
@@ -704,4 +773,66 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// queryPrometheus executa uma instant query e retorna o valor numérico.
+func queryPrometheus(baseURL, query string) float64 {
+	url := fmt.Sprintf("%s/api/v1/query?query=%s", baseURL, urlEncode(query))
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Value []interface{} `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0
+	}
+
+	if result.Status != "success" || len(result.Data.Result) == 0 {
+		return 0
+	}
+
+	// Value is [timestamp, "value_string"]
+	values := result.Data.Result[0].Value
+	if len(values) < 2 {
+		return 0
+	}
+	valStr, ok := values[1].(string)
+	if !ok {
+		return 0
+	}
+
+	var val float64
+	fmt.Sscanf(valStr, "%f", &val)
+	return val
+}
+
+func urlEncode(s string) string {
+	// Simple URL encoding for prometheus queries
+	replacer := strings.NewReplacer(
+		" ", "%20",
+		"{", "%7B",
+		"}", "%7D",
+		"\"", "%22",
+		"[", "%5B",
+		"]", "%5D",
+		"=", "%3D",
+		",", "%2C",
+		"!", "%21",
+	)
+	return replacer.Replace(s)
 }
