@@ -1,5 +1,5 @@
 // ATLAS Backend — Entry point
-// Sobe servidor HTTP com integração real ao Proxmox.
+// Servidor HTTP com integração real ao Proxmox + auto-bootstrap de VMs.
 package main
 
 import (
@@ -8,14 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
+	"golang.org/x/crypto/ssh"
 )
 
 // ─── Proxmox types ───────────────────────────────────────────
@@ -155,11 +158,235 @@ func (p *ProxmoxClient) GetContainers(nodeIP, nodeName string) ([]PveVM, error) 
 	return cts, nil
 }
 
+// ─── VM Network Discovery ────────────────────────────────────
+
+type VMInfo struct {
+	VMID   int    `json:"vmid"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	IP     string `json:"ip"`
+	Type   string `json:"type"` // vm or ct
+	Node   string `json:"node"`
+	// From SSH probe
+	HasNodeExporter bool   `json:"has_node_exporter"`
+	Bootstrapped    bool   `json:"bootstrapped"`
+	OS              string `json:"os_detected"`
+}
+
+// GetVMIP tenta descobrir o IP de uma VM via QEMU guest agent
+func (p *ProxmoxClient) GetVMIP(nodeIP, nodeName string, vmid int) string {
+	path := fmt.Sprintf("/nodes/%s/qemu/%d/agent/network-get-interfaces", nodeName, vmid)
+	data, err := p.request(nodeIP, path)
+	if err != nil {
+		return ""
+	}
+
+	var resp PveResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return ""
+	}
+
+	// Parse interfaces
+	var result struct {
+		Result []struct {
+			Name        string `json:"name"`
+			IPAddresses []struct {
+				IPAddress string `json:"ip-address"`
+				IPType    string `json:"ip-address-type"`
+			} `json:"ip-addresses"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return ""
+	}
+
+	// Find first non-loopback IPv4
+	for _, iface := range result.Result {
+		if iface.Name == "lo" {
+			continue
+		}
+		for _, addr := range iface.IPAddresses {
+			if addr.IPType == "ipv4" && !strings.HasPrefix(addr.IPAddress, "127.") {
+				return addr.IPAddress
+			}
+		}
+	}
+	return ""
+}
+
+// ─── SSH Bootstrap ───────────────────────────────────────────
+
+type BootstrapAgent struct {
+	SSHUser     string
+	SSHPassword string
+	mu          sync.Mutex
+	status      map[string]*BootstrapStatus // key = IP
+}
+
+type BootstrapStatus struct {
+	IP              string `json:"ip"`
+	Name            string `json:"name"`
+	Connected       bool   `json:"ssh_connected"`
+	OS              string `json:"os"`
+	NodeExporter    bool   `json:"node_exporter_installed"`
+	NodeExporterRun bool   `json:"node_exporter_running"`
+	Bootstrapped    bool   `json:"bootstrapped"`
+	LastCheck       int64  `json:"last_check"`
+	Error           string `json:"error,omitempty"`
+}
+
+func NewBootstrapAgent() *BootstrapAgent {
+	return &BootstrapAgent{
+		SSHUser:     getEnv("ATLAB_SSH_USER", "root"),
+		SSHPassword: getEnv("ATLAB_SSH_PASSWORD", "@tloginroot"),
+		status:      make(map[string]*BootstrapStatus),
+	}
+}
+
+// sshConnect establishes SSH connection with password auth
+func (b *BootstrapAgent) sshConnect(ip string) (*ssh.Client, error) {
+	config := &ssh.ClientConfig{
+		User: b.SSHUser,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(b.SSHPassword),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}
+
+	addr := net.JoinHostPort(ip, "22")
+	client, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return nil, fmt.Errorf("SSH dial failed: %w", err)
+	}
+	return client, nil
+}
+
+// runCommand executes a command via SSH and returns output
+func (b *BootstrapAgent) runCommand(client *ssh.Client, cmd string) (string, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	output, err := session.CombinedOutput(cmd)
+	return strings.TrimSpace(string(output)), err
+}
+
+// Probe checks a VM's status and installs node_exporter if needed
+func (b *BootstrapAgent) Probe(ip, name string) *BootstrapStatus {
+	b.mu.Lock()
+	st, exists := b.status[ip]
+	if !exists {
+		st = &BootstrapStatus{IP: ip, Name: name}
+		b.status[ip] = st
+	}
+	b.mu.Unlock()
+
+	// Connect
+	client, err := b.sshConnect(ip)
+	if err != nil {
+		st.Connected = false
+		st.Error = err.Error()
+		st.LastCheck = time.Now().Unix()
+		return st
+	}
+	defer client.Close()
+
+	st.Connected = true
+	st.Error = ""
+
+	// Detect OS
+	osInfo, _ := b.runCommand(client, "cat /etc/os-release 2>/dev/null | grep ^PRETTY_NAME | cut -d= -f2 | tr -d '\"'")
+	if osInfo == "" {
+		osInfo, _ = b.runCommand(client, "uname -s")
+	}
+	st.OS = osInfo
+
+	// Check if node_exporter is installed
+	_, err = b.runCommand(client, "which node_exporter || command -v node_exporter")
+	st.NodeExporter = err == nil
+
+	// Check if node_exporter is running
+	out, _ := b.runCommand(client, "systemctl is-active node_exporter 2>/dev/null || pgrep -x node_exporter")
+	st.NodeExporterRun = (out == "active" || out != "")
+
+	// If not installed/running, bootstrap it
+	if !st.NodeExporter || !st.NodeExporterRun {
+		log.Printf("[bootstrap] %s (%s): installing node_exporter...", name, ip)
+		b.installNodeExporter(client, st)
+	} else {
+		st.Bootstrapped = true
+	}
+
+	st.LastCheck = time.Now().Unix()
+	return st
+}
+
+func (b *BootstrapAgent) installNodeExporter(client *ssh.Client, st *BootstrapStatus) {
+	commands := []string{
+		// Download node_exporter
+		"cd /tmp && curl -sLO https://github.com/prometheus/node_exporter/releases/download/v1.8.1/node_exporter-1.8.1.linux-amd64.tar.gz",
+		// Extract
+		"cd /tmp && tar xzf node_exporter-1.8.1.linux-amd64.tar.gz",
+		// Install binary
+		"cp /tmp/node_exporter-1.8.1.linux-amd64/node_exporter /usr/local/bin/ && chmod +x /usr/local/bin/node_exporter",
+		// Create systemd service
+		`cat > /etc/systemd/system/node_exporter.service << 'UNIT'
+[Unit]
+Description=Prometheus Node Exporter
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT`,
+		// Enable and start
+		"systemctl daemon-reload",
+		"systemctl enable node_exporter",
+		"systemctl start node_exporter",
+		// Cleanup
+		"rm -rf /tmp/node_exporter-*",
+	}
+
+	for _, cmd := range commands {
+		_, err := b.runCommand(client, cmd)
+		if err != nil {
+			log.Printf("[bootstrap] %s: command failed: %s (error: %v)", st.Name, cmd[:min(50, len(cmd))], err)
+			st.Error = fmt.Sprintf("bootstrap failed at: %s", cmd[:min(50, len(cmd))])
+			return
+		}
+	}
+
+	// Verify
+	out, _ := b.runCommand(client, "systemctl is-active node_exporter")
+	st.NodeExporter = true
+	st.NodeExporterRun = (out == "active")
+	st.Bootstrapped = st.NodeExporterRun
+	if st.Bootstrapped {
+		log.Printf("[bootstrap] %s (%s): node_exporter installed and running ✓", st.Name, st.IP)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ─── Main ────────────────────────────────────────────────────
 
 func main() {
 	port := getEnv("ATLAB_PORT", "8080")
 	pve := NewProxmoxClient()
+	bootstrap := NewBootstrapAgent()
 
 	app := fiber.New(fiber.Config{
 		AppName:      "ATLAS",
@@ -176,7 +403,7 @@ func main() {
 		return c.JSON(fiber.Map{
 			"status":  "ok",
 			"service": "atlas-backend",
-			"version": "0.2.0",
+			"version": "0.3.0",
 		})
 	})
 
@@ -305,7 +532,7 @@ func main() {
 		})
 	})
 
-	// ─── All machines (aggregate from all nodes) ─────────────
+	// ─── All machines (aggregate from all nodes + discover IPs) ─
 	api.Get("/machines", func(c *fiber.Ctx) error {
 		type MachineItem struct {
 			VMID     int     `json:"vmid"`
@@ -313,6 +540,8 @@ func main() {
 			Type     string  `json:"type"`
 			Status   string  `json:"status"`
 			Node     string  `json:"node"`
+			NodeIP   string  `json:"node_ip"`
+			IP       string  `json:"ip"`
 			CPUs     int     `json:"cpus"`
 			CPU      float64 `json:"cpu_percent"`
 			MemPct   float64 `json:"mem_percent"`
@@ -337,9 +566,11 @@ func main() {
 				if vm.MaxMem > 0 {
 					memPct = float64(vm.Mem) / float64(vm.MaxMem) * 100
 				}
+				// Discover IP via guest agent
+				ip := pve.GetVMIP(nodeIP, status.Name, vm.VMID)
 				all = append(all, MachineItem{
 					VMID: vm.VMID, Name: vm.Name, Type: "vm", Status: vm.Status,
-					Node: status.Name, CPUs: vm.CPUs, CPU: vm.CPU * 100,
+					Node: status.Name, NodeIP: nodeIP, IP: ip, CPUs: vm.CPUs, CPU: vm.CPU * 100,
 					MemPct: memPct, MaxMemGB: float64(vm.MaxMem) / 1073741824,
 					DiskGB: float64(vm.MaxDisk) / 1073741824, Uptime: vm.Uptime,
 				})
@@ -349,9 +580,10 @@ func main() {
 				if ct.MaxMem > 0 {
 					memPct = float64(ct.Mem) / float64(ct.MaxMem) * 100
 				}
+				ip := pve.GetVMIP(nodeIP, status.Name, ct.VMID)
 				all = append(all, MachineItem{
 					VMID: ct.VMID, Name: ct.Name, Type: "ct", Status: ct.Status,
-					Node: status.Name, CPUs: ct.CPUs, CPU: ct.CPU * 100,
+					Node: status.Name, NodeIP: nodeIP, IP: ip, CPUs: ct.CPUs, CPU: ct.CPU * 100,
 					MemPct: memPct, MaxMemGB: float64(ct.MaxMem) / 1073741824,
 					DiskGB: float64(ct.MaxDisk) / 1073741824, Uptime: ct.Uptime,
 				})
@@ -359,6 +591,58 @@ func main() {
 		}
 
 		return c.JSON(fiber.Map{"machines": all, "total": len(all)})
+	})
+
+	// ─── Bootstrap: probe + auto-install node_exporter ────────
+	api.Post("/machines/bootstrap", func(c *fiber.Ctx) error {
+		var body struct {
+			IP   string `json:"ip"`
+			Name string `json:"name"`
+		}
+		if err := c.BodyParser(&body); err != nil || body.IP == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "ip is required"})
+		}
+
+		// Run probe in background
+		go bootstrap.Probe(body.IP, body.Name)
+
+		return c.JSON(fiber.Map{
+			"message": "bootstrap initiated",
+			"ip":      body.IP,
+		})
+	})
+
+	// ─── Bootstrap: probe all machines ───────────────────────
+	api.Post("/machines/bootstrap-all", func(c *fiber.Ctx) error {
+		// Get all machines with IPs
+		for _, nodeIP := range pve.Nodes {
+			status, err := pve.GetNodeStatus(nodeIP)
+			if err != nil {
+				continue
+			}
+			vms, _ := pve.GetVMs(nodeIP, status.Name)
+			for _, vm := range vms {
+				if vm.Status != "running" {
+					continue
+				}
+				ip := pve.GetVMIP(nodeIP, status.Name, vm.VMID)
+				if ip != "" {
+					go bootstrap.Probe(ip, vm.Name)
+				}
+			}
+		}
+		return c.JSON(fiber.Map{"message": "bootstrap initiated for all running VMs"})
+	})
+
+	// ─── Bootstrap status ────────────────────────────────────
+	api.Get("/machines/bootstrap-status", func(c *fiber.Ctx) error {
+		bootstrap.mu.Lock()
+		defer bootstrap.mu.Unlock()
+		statuses := make([]*BootstrapStatus, 0, len(bootstrap.status))
+		for _, s := range bootstrap.status {
+			statuses = append(statuses, s)
+		}
+		return c.JSON(fiber.Map{"statuses": statuses})
 	})
 
 	// ─── Placeholder routes ──────────────────────────────────

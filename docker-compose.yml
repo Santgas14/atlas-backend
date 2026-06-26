@@ -31,6 +31,8 @@ services:
       - ATLAB_EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
       - ATLAB_TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - ATLAB_TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - ATLAB_SSH_USER=root
+      - ATLAB_SSH_PASSWORD=@tloginroot
     depends_on:
       postgres:
         condition: service_healthy
