@@ -1,0 +1,98 @@
+# ══════════════════════════════════════════════════════════════
+# ATLAS — Docker Compose
+# VM: 10.101.53.218
+# Domínio futuro: atlas.atlab.ufc.br
+# ══════════════════════════════════════════════════════════════
+
+services:
+  # ─── Backend API (Go) ──────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: atlas-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ATLAB_ENV=production
+      - ATLAB_PORT=8080
+      - ATLAB_DB_URL=postgres://atlas:${DB_PASSWORD}@postgres:5432/atlas?sslmode=disable
+      - ATLAB_REDIS_URL=redis://redis:6379/0
+      - ATLAB_PROMETHEUS_URL=http://10.101.53.212:9000
+      - ATLAB_AUTHENTIK_ISSUER=https://authentik.atlab.ufc.br/application/o/atlab-platform/
+      - ATLAB_AUTHENTIK_CLIENT_ID=${AUTHENTIK_CLIENT_ID}
+      - ATLAB_AUTHENTIK_CLIENT_SECRET=${AUTHENTIK_CLIENT_SECRET}
+      - ATLAB_PROXMOX_NODES=10.101.53.240,10.101.53.243,10.101.53.247
+      - ATLAB_PROXMOX_TOKEN_ID=${PROXMOX_TOKEN_ID}
+      - ATLAB_PROXMOX_TOKEN_SECRET=${PROXMOX_TOKEN_SECRET}
+      - ATLAB_JWT_SECRET=${JWT_SECRET}
+      - ATLAB_EVOLUTION_API_URL=${EVOLUTION_API_URL:-}
+      - ATLAB_EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-}
+      - ATLAB_TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - ATLAB_TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - atlas-net
+
+  # ─── Frontend (React + Nginx) ──────────────────────────────
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: atlas-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - atlas-net
+
+  # ─── PostgreSQL ────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: atlas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: atlas
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/001_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atlas-net
+
+  # ─── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: atlas-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atlas-net
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  atlas-net:
+    driver: bridge
