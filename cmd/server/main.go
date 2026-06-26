@@ -388,6 +388,13 @@ func main() {
 	pve := NewProxmoxClient()
 	bootstrap := NewBootstrapAgent()
 
+	// Known IPs (until guest agent works everywhere)
+	knownIPs := map[int]string{
+		100: "10.101.53.203", // CLUSTERLEX
+		101: "10.101.53.202", // VM-GPU-ALPHA
+		102: "10.101.53.218", // ATLAS
+	}
+
 	app := fiber.New(fiber.Config{
 		AppName:      "ATLAS",
 		ServerHeader: "ATLAS",
@@ -566,8 +573,11 @@ func main() {
 				if vm.MaxMem > 0 {
 					memPct = float64(vm.Mem) / float64(vm.MaxMem) * 100
 				}
-				// Discover IP via guest agent
+				// Discover IP: guest agent first, then known IPs fallback
 				ip := pve.GetVMIP(nodeIP, status.Name, vm.VMID)
+				if ip == "" {
+					ip = knownIPs[vm.VMID]
+				}
 				all = append(all, MachineItem{
 					VMID: vm.VMID, Name: vm.Name, Type: "vm", Status: vm.Status,
 					Node: status.Name, NodeIP: nodeIP, IP: ip, CPUs: vm.CPUs, CPU: vm.CPU * 100,
@@ -581,6 +591,9 @@ func main() {
 					memPct = float64(ct.Mem) / float64(ct.MaxMem) * 100
 				}
 				ip := pve.GetVMIP(nodeIP, status.Name, ct.VMID)
+				if ip == "" {
+					ip = knownIPs[ct.VMID]
+				}
 				all = append(all, MachineItem{
 					VMID: ct.VMID, Name: ct.Name, Type: "ct", Status: ct.Status,
 					Node: status.Name, NodeIP: nodeIP, IP: ip, CPUs: ct.CPUs, CPU: ct.CPU * 100,
@@ -614,7 +627,6 @@ func main() {
 
 	// ─── Bootstrap: probe all machines ───────────────────────
 	api.Post("/machines/bootstrap-all", func(c *fiber.Ctx) error {
-		// Get all machines with IPs
 		for _, nodeIP := range pve.Nodes {
 			status, err := pve.GetNodeStatus(nodeIP)
 			if err != nil {
@@ -626,6 +638,9 @@ func main() {
 					continue
 				}
 				ip := pve.GetVMIP(nodeIP, status.Name, vm.VMID)
+				if ip == "" {
+					ip = knownIPs[vm.VMID]
+				}
 				if ip != "" {
 					go bootstrap.Probe(ip, vm.Name)
 				}
@@ -653,8 +668,34 @@ func main() {
 		return c.JSON(fiber.Map{"alerts": []interface{}{}})
 	})
 
-	log.Printf("✓ ATLAS Backend v0.2.0 rodando em :%s", port)
+	log.Printf("✓ ATLAS Backend v0.3.0 rodando em :%s", port)
 	log.Printf("  Proxmox nodes: %v", pve.Nodes)
+	log.Printf("  Known VMs: %v", knownIPs)
+
+	// Auto-bootstrap all known VMs on startup
+	go func() {
+		time.Sleep(5 * time.Second)
+		log.Println("[bootstrap] Iniciando auto-bootstrap de VMs conhecidas...")
+		for vmid, ip := range knownIPs {
+			if ip != "" {
+				name := fmt.Sprintf("VM-%d", vmid)
+				for _, nodeIP := range pve.Nodes {
+					st, err := pve.GetNodeStatus(nodeIP)
+					if err != nil {
+						continue
+					}
+					vms, _ := pve.GetVMs(nodeIP, st.Name)
+					for _, vm := range vms {
+						if vm.VMID == vmid {
+							name = vm.Name
+						}
+					}
+				}
+				go bootstrap.Probe(ip, name)
+			}
+		}
+	}()
+
 	log.Fatal(app.Listen(fmt.Sprintf(":%s", port)))
 }
 
